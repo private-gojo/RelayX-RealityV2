@@ -29,6 +29,7 @@ Credentials are fixed test values in the source for repeatable bring-up. They ar
 Requires Go and Xray on Android/Termux.
 
 ```sh
+cd x-relay-reality
 bash scripts/start-client.sh
 ```
 
@@ -39,6 +40,7 @@ Enter only the Cloud Run hostname when prompted. Point the Android proxy client 
 Build/publish the container from the GitHub Actions workflow, then deploy from Cloud Shell:
 
 ```sh
+cd x-relay-reality
 bash scripts/deploy.sh ghcr.io/private-gojo/relayx-reality-v2:latest
 ```
 
