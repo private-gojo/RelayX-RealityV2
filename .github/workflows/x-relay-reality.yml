@@ -1,0 +1,122 @@
+name: X-Relay Reality V2
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "x-relay-reality/**"
+      - ".github/workflows/x-relay-reality.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "x-relay-reality/**"
+      - ".github/workflows/x-relay-reality.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  source:
+    name: Go and shell validation
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: x-relay-reality
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.27.4"
+          cache: true
+          cache-dependency-path: x-relay-reality/go.sum
+
+      - name: Verify formatting
+        run: |
+          unformatted="$(find cmd internal -type f -name '*.go' -print0 | xargs -0 gofmt -l)"
+          test -z "$unformatted"
+
+      - name: Verify module lock
+        run: |
+          go mod download
+          go mod verify
+          go mod tidy -diff
+
+      - name: Static analysis
+        run: go vet ./...
+
+      - name: Cross-compile Linux ARM64 client
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /tmp/x-relay-arm64 ./cmd/x-relay
+
+      - name: Unit and integration tests
+        run: go test -race -cover ./...
+
+      - name: Shell syntax
+        run: |
+          for script in scripts/*.sh; do
+            bash -n "$script"
+          done
+
+  container:
+    name: Docker and Xray validation
+    runs-on: ubuntu-latest
+    needs: source
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build local image
+        run: docker buildx build --platform linux/amd64 --load --tag x-relay:ci ./x-relay-reality
+
+      - name: Validate generated Xray configs
+        run: docker run --rm --entrypoint /app/x-relay x-relay:ci validate-config
+
+      - name: Verify pinned Xray version
+        run: docker run --rm --entrypoint /usr/local/bin/xray x-relay:ci version | grep -F "26.11.9"
+
+      - name: Workflow syntax
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/x-relay-reality.yml
+
+  publish:
+    name: Publish GHCR image
+    runs-on: ubuntu-latest
+    needs:
+      - source
+      - container
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and publish
+        uses: docker/build-push-action@v7
+        with:
+          context: ./x-relay-reality
+          file: ./x-relay-reality/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/relayx-reality-v2:latest
+            ghcr.io/${{ github.repository_owner }}/relayx-reality-v2:sha-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
