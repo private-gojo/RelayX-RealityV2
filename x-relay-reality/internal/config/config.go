@@ -481,7 +481,18 @@ func (c *Config) GenerateNetModProfileJSON() ([]byte, error) {
 			"rules": []any{
 				map[string]any{
 					"type":        "field",
-					"ip":          []string{"geoip:private"},
+					"ip": []string{
+						"0.0.0.0/8",
+						"10.0.0.0/8",
+						"127.0.0.0/8",
+						"169.254.0.0/16",
+						"172.16.0.0/12",
+						"192.168.0.0/16",
+						"::/128",
+						"::1/128",
+						"fc00::/7",
+						"fe80::/10",
+					},
 					"outboundTag": "direct",
 				},
 			},
