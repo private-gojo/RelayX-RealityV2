@@ -2,15 +2,12 @@ package bridge
 
 import (
 	"context"
-	"crypto/subtle"
-	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
 
@@ -18,375 +15,228 @@ import (
 )
 
 const (
+	bufferSize     = 32 * 1024
+	dialTimeout    = 10 * time.Second
 	writeWait      = 10 * time.Second
-	pongWait       = 90 * time.Second
-	pingPeriod     = 30 * time.Second
-	maxMessageSize = 4 << 20
-	chainUpstream  = "127.0.0.1:18080"
-	chainPath      = "/_chain"
+	pongWait       = 60 * time.Second
+	pingPeriod     = (pongWait * 9) / 10
+	maxMessageSize = 64 * 1024
 )
 
-type Server struct {
-	upstream      string
-	chainUpstream string
-	path          string
-	token         string
-	limit         chan struct{}
-	upgrader      websocket.Upgrader
-	chainDialer   websocket.Dialer
-	mu            sync.Mutex
-	active        map[*websocket.Conn]struct{}
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  bufferSize,
+	WriteBufferSize: bufferSize,
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
 }
 
-func NewServer(upstream, path, token string, maxSessions int) *Server {
-	return &Server{
-		upstream:      upstream,
-		chainUpstream: chainUpstream,
-		path:          path,
-		token:         token,
-		limit:         make(chan struct{}, maxSessions),
-		active:        make(map[*websocket.Conn]struct{}),
-		upgrader: websocket.Upgrader{
-			ReadBufferSize:    4096,
-			WriteBufferSize:   4096,
-			EnableCompression: false,
-			CheckOrigin: func(r *http.Request) bool {
-				return r.Header.Get("Origin") == ""
-			},
-		},
-		chainDialer: websocket.Dialer{
-			HandshakeTimeout:  5 * time.Second,
-			EnableCompression: false,
-		},
-	}
-}
+// NewServerHandler returns an http.HandlerFunc that upgrades incoming HTTP requests
+// to WebSocket and bridges them to the local TCP targetAddr (Xray server).
+func NewServerHandler(targetAddr, expectedToken string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if expectedToken != "" {
+			token := r.Header.Get("X-Relay-Auth")
+			if token != expectedToken {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
 
-func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		wsConn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Printf("[server] websocket upgrade failed: %v", err)
 			return
 		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
-	mux.HandleFunc(chainPath, s.handleChain)
-	mux.HandleFunc("/_ws", s.handleTunnel)
-	mux.HandleFunc(s.path, s.handleTunnel)
-	return mux
+		defer wsConn.Close()
+
+		tcpConn, err := net.DialTimeout("tcp", targetAddr, dialTimeout)
+		if err != nil {
+			log.Printf("[server] failed to dial local xray target %s: %v", targetAddr, err)
+			return
+		}
+		defer tcpConn.Close()
+
+		bridgeConnections(wsConn, tcpConn)
+	}
 }
 
-func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
+// NewWSProxyHandler forwards incoming HTTP/WebSocket upgrade requests directly to a local
+// WebSocket backend (such as Xray's VLESS+WS inbound) using Go's native ReverseProxy
+// with immediate streaming flush, preserving all headers, subprotocols, and framing.
+func NewWSProxyHandler(targetWSAddr, wsPath, expectedToken string) http.HandlerFunc {
+	targetURL := &url.URL{
+		Scheme: "http",
+		Host:   targetWSAddr,
 	}
-	if !authorized(r.Header.Get("Authorization"), s.token) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	if !s.acquire(w) {
-		return
-	}
-	defer func() { <-s.limit }()
+	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+	proxy.FlushInterval = -1
 
-	ws, err := s.upgrader.Upgrade(w, r, nil)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if expectedToken != "" {
+			if r.Header.Get("X-Relay-Auth") != expectedToken {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
+
+		if wsPath != "" {
+			r.URL.Path = wsPath
+		}
+		proxy.ServeHTTP(w, r)
+	}
+}
+
+// RunClient starts a local TCP listener on listenAddr and forwards each connection
+// over WebSocket (wsURL) to the Cloud Run server.
+func RunClient(ctx context.Context, listenAddr, wsURL, hostHeader, relayToken string) error {
+	lc := net.ListenConfig{}
+	listener, err := lc.Listen(ctx, "tcp", listenAddr)
 	if err != nil {
-		return
-	}
-	s.track(ws, true)
-	defer s.track(ws, false)
-	defer ws.Close()
-
-	dialer := net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
-	tcp, err := dialer.DialContext(r.Context(), "tcp", s.upstream)
-	if err != nil {
-		_ = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "upstream unavailable"), time.Now().Add(writeWait))
-		return
-	}
-	defer tcp.Close()
-	relay(tcp, ws)
-}
-
-func (s *Server) handleChain(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if !authorized(r.Header.Get("Authorization"), s.token) &&
-		!authorized("Bearer "+r.Header.Get("X-Relay-Auth"), s.token) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	if !s.acquire(w) {
-		return
-	}
-	defer func() { <-s.limit }()
-
-	client, err := s.upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		return
-	}
-	s.track(client, true)
-	defer s.track(client, false)
-	defer client.Close()
-
-	headers := http.Header{}
-	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-		headers.Set("X-Forwarded-For", forwarded)
-	}
-	upstreamURL := "ws://" + s.chainUpstream + chainPathInternal
-	upstream, response, err := s.chainDialer.Dial(upstreamURL, headers)
-	if response != nil && response.Body != nil {
-		_ = response.Body.Close()
-	}
-	if err != nil {
-		_ = client.WriteControl(
-			websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "chain upstream unavailable"),
-			time.Now().Add(writeWait),
-		)
-		return
-	}
-	defer upstream.Close()
-	relayWebSockets(client, upstream)
-}
-
-const chainPathInternal = "/chain"
-
-func (s *Server) acquire(w http.ResponseWriter) bool {
-	select {
-	case s.limit <- struct{}{}:
-		return true
-	default:
-		http.Error(w, "session capacity reached", http.StatusServiceUnavailable)
-		return false
-	}
-}
-
-func (s *Server) track(conn *websocket.Conn, add bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if add {
-		s.active[conn] = struct{}{}
-		return
-	}
-	delete(s.active, conn)
-}
-
-func (s *Server) CloseAll() {
-	s.mu.Lock()
-	connections := make([]*websocket.Conn, 0, len(s.active))
-	for conn := range s.active {
-		connections = append(connections, conn)
-	}
-	s.mu.Unlock()
-	for _, conn := range connections {
-		_ = conn.Close()
-	}
-}
-
-type Client struct {
-	localAddr string
-	remoteURL string
-	token     string
-	limit     chan struct{}
-	dialer    websocket.Dialer
-}
-
-func NewClient(localAddr, remoteURL, token string, maxSessions int) (*Client, error) {
-	u, err := url.Parse(remoteURL)
-	if err != nil || u.Scheme != "wss" || u.Host == "" || u.User != nil || u.Fragment != "" {
-		return nil, errors.New("REMOTE_WS_URL must be a wss:// URL without userinfo or fragment")
-	}
-	host, _, err := net.SplitHostPort(localAddr)
-	if err != nil || host == "" {
-		return nil, errors.New("LOCAL_ADDR must include a host and port")
-	}
-	ip := net.ParseIP(host)
-	if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
-		return nil, errors.New("LOCAL_ADDR must bind to loopback only")
-	}
-	if len(token) < 32 {
-		return nil, errors.New("BRIDGE_TOKEN must be at least 32 characters")
-	}
-	if maxSessions < 1 || maxSessions > 1000 {
-		return nil, errors.New("MAX_SESSIONS must be from 1 to 1000")
-	}
-	return &Client{
-		localAddr: localAddr,
-		remoteURL: remoteURL,
-		token:     token,
-		limit:     make(chan struct{}, maxSessions),
-		dialer: websocket.Dialer{
-			Proxy:             http.ProxyFromEnvironment,
-			HandshakeTimeout:  15 * time.Second,
-			EnableCompression: false,
-		},
-	}, nil
-}
-
-func (c *Client) Run(ctx context.Context) error {
-	listener, err := net.Listen("tcp", c.localAddr)
-	if err != nil {
-		return fmt.Errorf("listen on %s: %w", c.localAddr, err)
+		return err
 	}
 	defer listener.Close()
+
+	log.Printf("[client] listening on %s -> forwarding to %s", listenAddr, wsURL)
 
 	go func() {
 		<-ctx.Done()
 		_ = listener.Close()
 	}()
 
-	log.Printf("[CLIENT] listening=%s remote=%s", c.localAddr, c.remoteURL)
 	for {
-		localConn, err := listener.Accept()
+		tcpConn, err := listener.Accept()
 		if err != nil {
-			if ctx.Err() != nil {
+			select {
+			case <-ctx.Done():
 				return nil
+			default:
+				log.Printf("[client] accept error: %v", err)
+				continue
 			}
-			return fmt.Errorf("accept local connection: %w", err)
 		}
-		select {
-		case c.limit <- struct{}{}:
-			go func() {
-				defer func() { <-c.limit }()
-				c.handleLocal(localConn)
-			}()
-		default:
-			_ = localConn.Close()
-		}
+
+		go handleClientConn(ctx, tcpConn, wsURL, hostHeader, relayToken)
 	}
 }
 
-func (c *Client) handleLocal(localConn net.Conn) {
-	defer localConn.Close()
-	header := http.Header{}
-	header.Set("Authorization", "Bearer "+c.token)
-	ws, response, err := c.dialer.Dial(c.remoteURL, header)
-	if response != nil && response.Body != nil {
-		_ = response.Body.Close()
+func handleClientConn(ctx context.Context, tcpConn net.Conn, wsURL, hostHeader, relayToken string) {
+	defer tcpConn.Close()
+
+	headers := http.Header{}
+	if hostHeader != "" {
+		headers.Set("Host", hostHeader)
 	}
+	if relayToken != "" {
+		headers.Set("X-Relay-Auth", relayToken)
+	}
+
+	dialer := websocket.Dialer{
+		HandshakeTimeout: dialTimeout,
+		ReadBufferSize:   bufferSize,
+		WriteBufferSize:  bufferSize,
+	}
+
+	wsConn, resp, err := dialer.DialContext(ctx, wsURL, headers)
 	if err != nil {
-		log.Printf("[CLIENT] websocket connect failed: %v", err)
+		if resp != nil {
+			log.Printf("[client] ws dial failed (HTTP %d): %v", resp.StatusCode, err)
+		} else {
+			log.Printf("[client] ws dial failed: %v", err)
+		}
 		return
 	}
-	defer ws.Close()
-	relay(localConn, ws)
+	defer wsConn.Close()
+
+	bridgeConnections(wsConn, tcpConn)
 }
 
-func authorized(header, token string) bool {
-	const prefix = "Bearer "
-	if !strings.HasPrefix(header, prefix) {
-		return false
-	}
-	presented := strings.TrimPrefix(header, prefix)
-	return len(presented) == len(token) &&
-		subtle.ConstantTimeCompare([]byte(presented), []byte(token)) == 1
-}
-
-func relay(tcp net.Conn, ws *websocket.Conn) {
-	ws.SetReadLimit(maxMessageSize)
-	_ = ws.SetReadDeadline(time.Now().Add(pongWait))
-	ws.SetPongHandler(func(string) error {
-		return ws.SetReadDeadline(time.Now().Add(pongWait))
+// bridgeConnections copies data bidirectionally between a WebSocket connection and a TCP connection.
+func bridgeConnections(wsConn *websocket.Conn, tcpConn net.Conn) {
+	wsConn.SetReadLimit(maxMessageSize)
+	_ = wsConn.SetReadDeadline(time.Now().Add(pongWait))
+	wsConn.SetPongHandler(func(string) error {
+		_ = wsConn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
 	})
 
-	stopPing := make(chan struct{})
-	pingDone := make(chan struct{})
+	var writeMu sync.Mutex
+	writeWS := func(messageType int, data []byte) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_ = wsConn.SetWriteDeadline(time.Now().Add(writeWait))
+		return wsConn.WriteMessage(messageType, data)
+	}
+
+	done := make(chan struct{})
+	var once sync.Once
+	closeBoth := func() {
+		once.Do(func() {
+			close(done)
+			_ = wsConn.Close()
+			_ = tcpConn.Close()
+		})
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	// 1. WebSocket -> TCP
 	go func() {
-		defer close(pingDone)
+		defer wg.Done()
+		defer closeBoth()
+		for {
+			msgType, data, err := wsConn.ReadMessage()
+			if err != nil {
+				return
+			}
+			if msgType != websocket.BinaryMessage && msgType != websocket.TextMessage {
+				continue
+			}
+			if _, err := tcpConn.Write(data); err != nil {
+				return
+			}
+		}
+	}()
+
+	// 2. TCP -> WebSocket
+	go func() {
+		defer wg.Done()
+		defer closeBoth()
+		buf := make([]byte, bufferSize)
+		for {
+			n, err := tcpConn.Read(buf)
+			if n > 0 {
+				if wErr := writeWS(websocket.BinaryMessage, buf[:n]); wErr != nil {
+					return
+				}
+			}
+			if err != nil {
+				if err != io.EOF {
+					log.Printf("[bridge] tcp read error: %v", err)
+				}
+				return
+			}
+		}
+	}()
+
+	// 3. Ping ticker to keep Cloud Run connection alive
+	go func() {
+		defer wg.Done()
 		ticker := time.NewTicker(pingPeriod)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-stopPing:
+			case <-done:
 				return
 			case <-ticker.C:
-				if err := ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeWait)); err != nil {
+				if err := writeWS(websocket.PingMessage, nil); err != nil {
+					closeBoth()
 					return
 				}
 			}
 		}
 	}()
 
-	done := make(chan struct{}, 2)
-	go func() {
-		buffer := make([]byte, 32*1024)
-		for {
-			n, err := tcp.Read(buffer)
-			if n > 0 {
-				_ = ws.SetWriteDeadline(time.Now().Add(writeWait))
-				if writeErr := ws.WriteMessage(websocket.BinaryMessage, buffer[:n]); writeErr != nil {
-					break
-				}
-			}
-			if err != nil {
-				break
-			}
-		}
-		done <- struct{}{}
-	}()
-
-	go func() {
-		for {
-			messageType, payload, err := ws.ReadMessage()
-			if err != nil || messageType != websocket.BinaryMessage {
-				break
-			}
-			if err := writeAll(tcp, payload); err != nil {
-				break
-			}
-		}
-		done <- struct{}{}
-	}()
-
-	<-done
-	_ = tcp.Close()
-	_ = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(writeWait))
-	_ = ws.Close()
-	<-done
-	close(stopPing)
-	<-pingDone
-}
-
-func relayWebSockets(client, upstream *websocket.Conn) {
-	done := make(chan struct{}, 2)
-	pump := func(dst, src *websocket.Conn) {
-		defer func() { done <- struct{}{} }()
-		src.SetReadLimit(maxMessageSize)
-		for {
-			messageType, payload, err := src.ReadMessage()
-			if err != nil {
-				return
-			}
-			_ = dst.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := dst.WriteMessage(messageType, payload); err != nil {
-				return
-			}
-		}
-	}
-	go pump(upstream, client)
-	go pump(client, upstream)
-	<-done
-	_ = client.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(writeWait))
-	_ = upstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(writeWait))
-	_ = client.Close()
-	_ = upstream.Close()
-	<-done
-}
-
-func writeAll(writer io.Writer, data []byte) error {
-	for len(data) > 0 {
-		n, err := writer.Write(data)
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return io.ErrShortWrite
-		}
-		data = data[n:]
-	}
-	return nil
+	wg.Wait()
 }

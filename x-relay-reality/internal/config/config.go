@@ -34,10 +34,11 @@ type Config struct {
 }
 
 const (
-	DefaultBakedUUID       = "1ef40695-9d5b-498e-aeaa-c44ab281ca61"
-	DefaultBakedPrivateKey = "eKS-gh5AXjEdJ3sGF7hDpUhFlKGJ615192I4no0yFGo"
-	DefaultBakedPublicKey  = "g5fbef1N1N6sR6eF1B8cR-gM7l5vE9m8pW5qX2zK1yA"
-	DefaultBakedShortID    = "6ca30cd71da67803"
+	// Verified Curve25519 keypair generated via `xray x25519`
+	DefaultBakedUUID       = "47be59a9-103b-4065-9c3a-ebb9ecf8ffd3"
+	DefaultBakedPrivateKey = "2I5TZL08U6Jt930W-VswdvrUqlWfDfpa52EEB8i1QXA"
+	DefaultBakedPublicKey  = "xsGaX-SwwQLt9kan7DY732udvFJdpJMujPGkLfvozwM"
+	DefaultBakedShortID    = "3e08bf958266d858"
 	DefaultBakedRelayToken = "relayx-secret-2026"
 	DefaultRealityDest     = "firebaseremoteconfigrealtime.googleapis.com:443"
 	DefaultServerNamesCSV  = "googleapis.com,firebaseremoteconfigrealtime.googleapis.com"
@@ -146,9 +147,6 @@ func (c *Config) EnsureCredentials() error {
 }
 
 // GenerateServerJSON returns the Xray server configuration JSON bytes.
-// It configures two localhost inbounds:
-//  1. VLESS+WS on XrayWSAddr (default 127.0.0.1:18080) for the outer Cloud Run transport leg.
-//  2. VLESS+XHTTP+REALITY on XrayAddr (default 127.0.0.1:18443) for the inner REALITY leg.
 func (c *Config) GenerateServerJSON() ([]byte, error) {
 	if c.UUID == "" || c.PrivateKey == "" {
 		return nil, errors.New("UUID and PrivateKey must be set before generating server config")
@@ -214,7 +212,7 @@ func (c *Config) GenerateServerJSON() ([]byte, error) {
 					"network":  "xhttp",
 					"security": "reality",
 					"xhttpSettings": map[string]any{
-						"mode": "auto",
+						"mode": "stream-one",
 						"path": c.XHTTPPath,
 					},
 					"realitySettings": map[string]any{
@@ -283,7 +281,7 @@ func (c *Config) GenerateClientJSON() ([]byte, error) {
 		"inbounds": []any{
 			map[string]any{
 				"tag":      "socks-in",
-				"port":     10808,
+				"port":     10809,
 				"listen":   "127.0.0.1",
 				"protocol": "socks",
 				"settings": map[string]any{
@@ -315,7 +313,7 @@ func (c *Config) GenerateClientJSON() ([]byte, error) {
 					"network":  "xhttp",
 					"security": "reality",
 					"xhttpSettings": map[string]any{
-						"mode": "auto",
+						"mode": "stream-one",
 						"path": c.XHTTPPath,
 					},
 					"realitySettings": map[string]any{
@@ -334,9 +332,8 @@ func (c *Config) GenerateClientJSON() ([]byte, error) {
 	return json.MarshalIndent(clientConfig, "", "  ")
 }
 
-// GenerateNetModProfileJSON returns a complete standalone Xray/NetMod JSON profile that uses
-// sockopt.dialerProxy to chain VLESS+XHTTP+REALITY over an outer VLESS+WS+TLS Cloud Run leg
-// without requiring Termux or any external local adapter.
+// GenerateNetModProfileJSON returns a complete standalone Xray/NetMod JSON profile.
+// Note: NetMod Syna binds its own local SOCKS port (10809) based on the first inbound entry.
 func (c *Config) GenerateNetModProfileJSON() ([]byte, error) {
 	if c.CloudRunHost == "" {
 		return nil, errors.New("CloudRunHost is required to generate a NetMod profile")
@@ -372,22 +369,12 @@ func (c *Config) GenerateNetModProfileJSON() ([]byte, error) {
 			map[string]any{
 				"tag":      "socks-in",
 				"listen":   "127.0.0.1",
-				"port":     10808,
+				"port":     10809,
 				"protocol": "socks",
 				"settings": map[string]any{
 					"auth": "noauth",
 					"udp":  true,
 				},
-				"sniffing": map[string]any{
-					"enabled":      true,
-					"destOverride": []string{"http", "tls"},
-				},
-			},
-			map[string]any{
-				"tag":      "http-in",
-				"listen":   "127.0.0.1",
-				"port":     10809,
-				"protocol": "http",
 				"sniffing": map[string]any{
 					"enabled":      true,
 					"destOverride": []string{"http", "tls"},
@@ -417,7 +404,7 @@ func (c *Config) GenerateNetModProfileJSON() ([]byte, error) {
 					"network":  "xhttp",
 					"security": "reality",
 					"xhttpSettings": map[string]any{
-						"mode": "auto",
+						"mode": "stream-one",
 						"path": c.XHTTPPath,
 					},
 					"realitySettings": map[string]any{
@@ -481,7 +468,7 @@ func (c *Config) GenerateNetModProfileJSON() ([]byte, error) {
 			"rules": []any{
 				map[string]any{
 					"type":        "field",
-					"ip":          []string{"0.0.0.0/8", "10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "::/128", "::1/128", "fc00::/7", "fe80::/10"},
+					"ip":          []string{"geoip:private"},
 					"outboundTag": "direct",
 				},
 			},
