@@ -52,7 +52,7 @@ func TestGenerateServerJSON(t *testing.T) {
 }
 
 func TestGenerateNetModProfileJSON(t *testing.T) {
-	cfg := &Config{
+	cfg := &appconfig.Config{
 		XrayAddr:     "127.0.0.1:18443",
 		ChainPath:    "/_chain",
 		XHTTPPath:    "/xh",
