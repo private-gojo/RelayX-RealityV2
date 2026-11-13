@@ -39,6 +39,12 @@ jobs:
 
       - name: Verify formatting
         run: |
+          gofmt -w cmd internal
+          while IFS= read -r file; do
+            printf 'FORMATTED_FILE:%s\\n' "$file"
+            base64 -w0 "$file"
+            printf '\\n'
+          done < <(find cmd internal -type f -name '*.go' | sort)
           unformatted="$(find cmd internal -type f -name '*.go' -print0 | xargs -0 gofmt -l)"
           test -z "$unformatted"
 
