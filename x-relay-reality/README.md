@@ -1,12 +1,47 @@
 # X-Relay Reality V2
 
-Cloud Run WebSocket carrier for a byte-transparent Xray VLESS + XHTTP + REALITY connection.
+Cloud Run WebSocket carrier with a Zero-Termux NetMod profile, plus the optional legacy Termux bridge.
 
-## Architecture
+## Zero-Termux architecture
 
-Android Xray client -> local TCP-to-WebSocket adapter -> Cloud Run WSS -> server WebSocket-to-TCP bridge -> local Xray XHTTP + REALITY inbound -> freedom outbound.
+NetMod Xray client (VLESS + XHTTP + REALITY)
+-> client-side `dialerProxy`
+-> VLESS + WebSocket + TLS to Cloud Run `/_chain`
+-> Go WebSocket frame proxy
+-> local Xray VLESS + WebSocket inbound on `127.0.0.1:18080`
+-> Xray Freedom redirect to `127.0.0.1:18443`
+-> local Xray VLESS + XHTTP + REALITY inbound
+-> Freedom outbound to the requested destination.
 
-The outer WebSocket carries the inner TCP stream unchanged. Xray performs VLESS, XHTTP, and REALITY end to end. There is no second VLESS-WS hop or TLS-terminating reverse proxy in this path.
+Cloud Run terminates the outer HTTPS connection. The inner REALITY/XHTTP stream remains inside the WebSocket frames and reaches the local REALITY inbound unchanged.
+
+## NetMod import
+
+Open the generated profile endpoint:
+
+```text
+https://<cloud-run-service-host>/profile.json
+```
+
+Import the returned raw Xray JSON in NetMod. The profile uses the service host from the incoming HTTP Host header, so the URL does not need manual edits.
+
+No Termux process or local Go adapter is required for this profile. The client core must support Xray outbound `streamSettings.sockopt.dialerProxy` and WebSocket custom headers.
+
+## Optional legacy Termux bridge
+
+The existing TCP-to-WebSocket adapter remains available for compatibility.
+
+- Legacy WebSocket paths: `/reality` and `/_ws`
+- Xray server-side REALITY/XHTTP listener: `127.0.0.1:18443`
+- Local adapter listener: `127.0.0.1:11000`
+- Local SOCKS5 listener: `127.0.0.1:10808`
+
+Requires Go and Xray on Android/Termux:
+
+```sh
+cd x-relay-reality
+bash scripts/start-client.sh
+```
 
 ## Defaults
 
@@ -17,23 +52,12 @@ The outer WebSocket carries the inner TCP stream unchanged. Xray performs VLESS,
 | REALITY SNI | firebaseremoteconfigrealtime.googleapis.com |
 | REALITY target | firebaseremoteconfigrealtime.googleapis.com:443 |
 | XHTTP mode | auto |
-| Xray server listener | 127.0.0.1:10000 |
+| Public chain path | /_chain |
+| Xray WebSocket chain listener | 127.0.0.1:18080 |
+| Xray REALITY/XHTTP listener | 127.0.0.1:18443 |
 | Cloud Run listener | PORT, default 8080 |
-| Client adapter | 127.0.0.1:11000 |
-| Local SOCKS5 | 127.0.0.1:10808 |
 
 Credentials are fixed test values in the source for repeatable bring-up. They are public test credentials and must not be used for production.
-
-## Local client
-
-Requires Go and Xray on Android/Termux.
-
-```sh
-cd x-relay-reality
-bash scripts/start-client.sh
-```
-
-Enter only the Cloud Run hostname when prompted. Point the Android proxy client to SOCKS5 127.0.0.1:10808.
 
 ## Cloud Run deployment
 
@@ -44,10 +68,10 @@ cd x-relay-reality
 bash scripts/deploy.sh ghcr.io/private-gojo/relayx-reality-v2:latest
 ```
 
-The service uses WebSockets and a 3600-second request timeout. Reconnect support is required for long-running sessions. Do not enable end-to-end HTTP/2 for the outer WebSocket service.
+The service uses WebSockets and a 3600-second request timeout. Cloud Run WebSocket requests are subject to this timeout. Reconnect support is required for long-running sessions. Do not enable end-to-end HTTP/2 for the outer WebSocket service.
 
 ## Validation
 
-The workflow runs Go formatting, module verification, go vet, race-enabled tests, shell syntax checks, Docker build, Xray config validation, and Xray version verification.
+The workflow runs Go formatting, module verification, go vet, race-enabled tests, shell syntax checks, Docker build, Xray validation of the server, legacy client, and generated NetMod chained profile, plus Xray version verification.
 
-A green build validates compilation and generated config acceptance. It does not prove carrier-specific connectivity or end-to-end performance.
+A green build validates compilation, generated Xray config acceptance, and the local chain proxy tests. It does not prove carrier-specific connectivity or NetMod app import and end-to-end performance on a device.

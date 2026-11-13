@@ -84,6 +84,26 @@ jobs:
       - name: Verify pinned Xray version
         run: docker run --rm --entrypoint /usr/local/bin/xray x-relay:ci version | grep -F "26.11.9"
 
+      - name: Smoke test server, health, and NetMod profile
+        run: |
+          docker run -d --name x-relay-test -p 18080:8080 x-relay:ci
+          trap 'docker logs x-relay-test || true; docker rm -f x-relay-test >/dev/null 2>&1 || true' EXIT
+
+          ready=0
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/healthz >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" -eq 1
+
+          curl -fsS -H "Host: smoke-test.run.app" http://127.0.0.1:18080/profile.json > /tmp/netmod-profile.json
+          jq -e '.outbounds[0].streamSettings.sockopt.dialerProxy == "cloudrun-chain"' /tmp/netmod-profile.json
+          jq -e '.outbounds[1].streamSettings.wsSettings.path == "/_chain"' /tmp/netmod-profile.json
+          test "$(curl -sS -o /dev/null -w "%{http_code}" http://127.0.0.1:18080/_chain)" = "401"
+
       - name: Workflow syntax
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/x-relay-reality.yml
 

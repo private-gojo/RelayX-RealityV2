@@ -15,14 +15,20 @@ import (
 )
 
 const (
-	FixedUUID        = "5f8fe3bc-169b-4c8c-b4ba-5fc94abd6ce0"
-	FixedPrivateKey  = "MD7Faoxwbj5bFx7vDdDpYaAvePia1H6CZ4CvHmrFemU"
-	FixedPublicKey   = "xaTNSdK2aQv7ND8DxZcej-dtiEldJZUIRCoQHXkPwFw"
-	FixedShortID     = "b25078a30229392b"
-	FixedBridgeToken = "d0b392d0ce0f05a82dcee11d421c9b45da9790692c09551032ba2e800e8f7966"
-	FixedServerName  = "firebaseremoteconfigrealtime.googleapis.com"
-	FixedTarget      = "firebaseremoteconfigrealtime.googleapis.com:443"
-	FixedPath        = "/reality"
+	FixedUUID          = "5f8fe3bc-169b-4c8c-b4ba-5fc94abd6ce0"
+	FixedPrivateKey    = "MD7Faoxwbj5bFx7vDdDpYaAvePia1H6CZ4CvHmrFemU"
+	FixedPublicKey     = "xaTNSdK2aQv7ND8DxZcej-dtiEldJZUIRCoQHXkPwFw"
+	FixedShortID       = "b25078a30229392b"
+	FixedBridgeToken   = "d0b392d0ce0f05a82dcee11d421c9b45da9790692c09551032ba2e800e8f7966"
+	FixedServerName    = "firebaseremoteconfigrealtime.googleapis.com"
+	FixedTarget        = "firebaseremoteconfigrealtime.googleapis.com:443"
+	FixedCloudRunHost  = "relayx-reality-v2-667648148327.asia-east1.run.app"
+	FixedPath          = "/reality"
+	ChainPath          = "/_chain"
+	LegacyPath         = "/_ws"
+	ChainInboundPath   = "/chain"
+	ChainInboundPort   = 18080
+	RealityInboundPort = 18443
 )
 
 var uuidPattern = regexp.MustCompile("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$")
@@ -138,8 +144,26 @@ func (c Config) ServerJSON() ([]byte, error) {
 		"log": map[string]any{"loglevel": "warning"},
 		"inbounds": []any{
 			map[string]any{
+				"tag":      "chain-ws",
 				"listen":   "127.0.0.1",
-				"port":     10000,
+				"port":     ChainInboundPort,
+				"protocol": "vless",
+				"settings": map[string]any{
+					"clients":    []any{map[string]any{"id": c.UUID}},
+					"decryption": "none",
+				},
+				"streamSettings": map[string]any{
+					"method":   "websocket",
+					"security": "none",
+					"wsSettings": map[string]any{
+						"path": ChainInboundPath,
+					},
+				},
+			},
+			map[string]any{
+				"tag":      "reality-xhttp",
+				"listen":   "127.0.0.1",
+				"port":     RealityInboundPort,
 				"protocol": "vless",
 				"settings": map[string]any{
 					"clients":    []any{map[string]any{"id": c.UUID}},
@@ -163,11 +187,42 @@ func (c Config) ServerJSON() ([]byte, error) {
 				},
 			},
 		},
-		"outbounds": []any{map[string]any{"protocol": "freedom", "tag": "direct"}},
+		"outbounds": []any{
+			map[string]any{
+				"tag":      "direct",
+				"protocol": "freedom",
+			},
+			map[string]any{
+				"tag":      "chain-redirect",
+				"protocol": "freedom",
+				"settings": map[string]any{
+					"redirect": "127.0.0.1:18443",
+					"finalRules": []any{
+						map[string]any{
+							"action":  "allow",
+							"network": "tcp",
+							"ip":      []string{"127.0.0.1/32"},
+							"port":    "18443",
+						},
+					},
+				},
+			},
+		},
+		"routing": map[string]any{
+			"rules": []any{
+				map[string]any{
+					"type":        "field",
+					"inboundTag":  []string{"chain-ws"},
+					"network":     "tcp",
+					"outboundTag": "chain-redirect",
+				},
+			},
+		},
 	}
 	return json.MarshalIndent(config, "", "  ")
 }
 
+// ClientJSON preserves the optional Termux adapter profile.
 func (c Config) ClientJSON() ([]byte, error) {
 	publicKey, err := c.PublicKey()
 	if err != nil {
@@ -216,6 +271,121 @@ func (c Config) ClientJSON() ([]byte, error) {
 		},
 	}
 	return json.MarshalIndent(config, "", "  ")
+}
+
+// NetModJSON returns a complete Xray config with the Cloud Run WS carrier as a dialerProxy.
+func (c Config) NetModJSON(cloudRunHost string) ([]byte, error) {
+	host, err := normalizeHost(cloudRunHost)
+	if err != nil {
+		return nil, err
+	}
+	publicKey, err := c.PublicKey()
+	if err != nil {
+		return nil, err
+	}
+
+	config := map[string]any{
+		"log": map[string]any{"loglevel": "warning"},
+		"inbounds": []any{
+			map[string]any{
+				"listen":   "127.0.0.1",
+				"port":     10808,
+				"protocol": "socks",
+				"settings": map[string]any{"udp": true},
+			},
+		},
+		"outbounds": []any{
+			map[string]any{
+				"tag":      "proxy",
+				"protocol": "vless",
+				"settings": map[string]any{
+					"vnext": []any{
+						map[string]any{
+							"address": c.ServerName,
+							"port":    443,
+							"users": []any{
+								map[string]any{"id": c.UUID, "encryption": "none"},
+							},
+						},
+					},
+				},
+				"streamSettings": map[string]any{
+					"method":   "xhttp",
+					"security": "reality",
+					"realitySettings": map[string]any{
+						"serverName":  c.ServerName,
+						"fingerprint": "chrome",
+						"password":    publicKey,
+						"shortId":     c.ShortID,
+					},
+					"xhttpSettings": map[string]any{
+						"path": c.Path,
+						"mode": "auto",
+					},
+					"sockopt": map[string]any{
+						"dialerProxy": "cloudrun-chain",
+					},
+				},
+			},
+			map[string]any{
+				"tag":      "cloudrun-chain",
+				"protocol": "vless",
+				"settings": map[string]any{
+					"vnext": []any{
+						map[string]any{
+							"address": host,
+							"port":    443,
+							"users": []any{
+								map[string]any{"id": c.UUID, "encryption": "none"},
+							},
+						},
+					},
+				},
+				"streamSettings": map[string]any{
+					"method":   "websocket",
+					"security": "tls",
+					"tlsSettings": map[string]any{
+						"serverName": host,
+						"alpn":       []string{"http/1.1"},
+					},
+					"wsSettings": map[string]any{
+						"path":            ChainPath,
+						"host":            host,
+						"heartbeatPeriod": 20,
+						"headers": map[string]any{
+							"Authorization": "Bearer " + c.BridgeToken,
+						},
+					},
+				},
+			},
+		},
+	}
+	return json.MarshalIndent(config, "", "  ")
+}
+
+func normalizeHost(host string) (string, error) {
+	host = strings.TrimSpace(strings.ToLower(host))
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	if host == "" || len(host) > 253 || strings.ContainsAny(host, "/\\?# \t\r\n") {
+		return "", errors.New("Cloud Run host must be a hostname without a scheme, path, or query")
+	}
+	labels := strings.Split(host, ".")
+	if len(labels) < 2 {
+		return "", errors.New("Cloud Run host must be a fully qualified hostname")
+	}
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", errors.New("Cloud Run host contains an invalid DNS label")
+		}
+		for _, ch := range label {
+			if (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9') && ch != '-' {
+				return "", errors.New("Cloud Run host contains an invalid DNS character")
+			}
+		}
+	}
+	return host, nil
 }
 
 func valueOr(value, fallback string) string {

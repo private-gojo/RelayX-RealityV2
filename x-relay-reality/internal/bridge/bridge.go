@@ -22,25 +22,30 @@ const (
 	pongWait       = 90 * time.Second
 	pingPeriod     = 30 * time.Second
 	maxMessageSize = 4 << 20
+	chainUpstream  = "127.0.0.1:18080"
+	chainPath      = "/_chain"
 )
 
 type Server struct {
-	upstream string
-	path     string
-	token    string
-	limit    chan struct{}
-	upgrader websocket.Upgrader
-	mu       sync.Mutex
-	active   map[*websocket.Conn]struct{}
+	upstream      string
+	chainUpstream string
+	path          string
+	token         string
+	limit         chan struct{}
+	upgrader      websocket.Upgrader
+	chainDialer   websocket.Dialer
+	mu            sync.Mutex
+	active        map[*websocket.Conn]struct{}
 }
 
 func NewServer(upstream, path, token string, maxSessions int) *Server {
 	return &Server{
-		upstream: upstream,
-		path:     path,
-		token:    token,
-		limit:    make(chan struct{}, maxSessions),
-		active:   make(map[*websocket.Conn]struct{}),
+		upstream:      upstream,
+		chainUpstream: chainUpstream,
+		path:          path,
+		token:         token,
+		limit:         make(chan struct{}, maxSessions),
+		active:        make(map[*websocket.Conn]struct{}),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:    4096,
 			WriteBufferSize:   4096,
@@ -48,6 +53,10 @@ func NewServer(upstream, path, token string, maxSessions int) *Server {
 			CheckOrigin: func(r *http.Request) bool {
 				return r.Header.Get("Origin") == ""
 			},
+		},
+		chainDialer: websocket.Dialer{
+			HandshakeTimeout:  5 * time.Second,
+			EnableCompression: false,
 		},
 	}
 }
@@ -62,6 +71,8 @@ func (s *Server) Handler() http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	mux.HandleFunc(chainPath, s.handleChain)
+	mux.HandleFunc("/_ws", s.handleTunnel)
 	mux.HandleFunc(s.path, s.handleTunnel)
 	return mux
 }
@@ -75,13 +86,10 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	select {
-	case s.limit <- struct{}{}:
-		defer func() { <-s.limit }()
-	default:
-		http.Error(w, "session capacity reached", http.StatusServiceUnavailable)
+	if !s.acquire(w) {
 		return
 	}
+	defer func() { <-s.limit }()
 
 	ws, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -99,6 +107,61 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tcp.Close()
 	relay(tcp, ws)
+}
+
+func (s *Server) handleChain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !authorized(r.Header.Get("Authorization"), s.token) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if !s.acquire(w) {
+		return
+	}
+	defer func() { <-s.limit }()
+
+	client, err := s.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	s.track(client, true)
+	defer s.track(client, false)
+	defer client.Close()
+
+	headers := http.Header{}
+	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+		headers.Set("X-Forwarded-For", forwarded)
+	}
+	upstreamURL := "ws://" + s.chainUpstream + chainPathInternal
+	upstream, response, err := s.chainDialer.Dial(upstreamURL, headers)
+	if response != nil && response.Body != nil {
+		_ = response.Body.Close()
+	}
+	if err != nil {
+		_ = client.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "chain upstream unavailable"),
+			time.Now().Add(writeWait),
+		)
+		return
+	}
+	defer upstream.Close()
+	relayWebSockets(client, upstream)
+}
+
+const chainPathInternal = "/chain"
+
+func (s *Server) acquire(w http.ResponseWriter) bool {
+	select {
+	case s.limit <- struct{}{}:
+		return true
+	default:
+		http.Error(w, "session capacity reached", http.StatusServiceUnavailable)
+		return false
+	}
 }
 
 func (s *Server) track(conn *websocket.Conn, add bool) {
@@ -285,6 +348,32 @@ func relay(tcp net.Conn, ws *websocket.Conn) {
 	<-done
 	close(stopPing)
 	<-pingDone
+}
+
+func relayWebSockets(client, upstream *websocket.Conn) {
+	done := make(chan struct{}, 2)
+	pump := func(dst, src *websocket.Conn) {
+		defer func() { done <- struct{}{} }()
+		src.SetReadLimit(maxMessageSize)
+		for {
+			messageType, payload, err := src.ReadMessage()
+			if err != nil {
+				return
+			}
+			_ = dst.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := dst.WriteMessage(messageType, payload); err != nil {
+				return
+			}
+		}
+	}
+	go pump(upstream, client)
+	go pump(client, upstream)
+	<-done
+	_ = client.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(writeWait))
+	_ = upstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(writeWait))
+	_ = client.Close()
+	_ = upstream.Close()
+	<-done
 }
 
 func writeAll(writer io.Writer, data []byte) error {
