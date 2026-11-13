@@ -481,7 +481,7 @@ func (c *Config) GenerateNetModProfileJSON() ([]byte, error) {
 			"rules": []any{
 				map[string]any{
 					"type":        "field",
-					"ip":          []string{
+					"ip":           []string{
 						"0.0.0.0/8",
 						"10.0.0.0/8",
 						"127.0.0.0/8",
