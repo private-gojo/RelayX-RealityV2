@@ -169,7 +169,7 @@ func TestChainWebsocketProxiesFrames(t *testing.T) {
 
 	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/_chain"
 	header := http.Header{}
-	header.Set("Authorization", "Bearer "+token)
+	header.Set("X-Relay-Auth", token)
 	ws, _, err := websocket.DefaultDialer.Dial(wsURL, header)
 	if err != nil {
 		t.Fatal(err)
