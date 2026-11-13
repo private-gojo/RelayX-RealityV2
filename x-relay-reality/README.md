@@ -75,3 +75,21 @@ The service uses WebSockets and a 3600-second request timeout. Cloud Run WebSock
 The workflow runs Go formatting, module verification, go vet, race-enabled tests, shell syntax checks, Docker build, Xray validation of the server, legacy client, and generated NetMod chained profile, plus Xray version verification.
 
 A green build validates compilation, generated Xray config acceptance, and the local chain proxy tests. It does not prove carrier-specific connectivity or NetMod app import and end-to-end performance on a device.
+
+
+## Source layout
+
+The Go implementation is split by responsibility:
+
+- `cmd/x-relay/`: CLI entrypoint.
+- `internal/config/`: environment settings and credential defaults.
+- `internal/xray/config/`: generated Xray server, client, and NetMod profiles; server inbound, outbound, and routing definitions are separate files.
+- `internal/xray/process/`: config validation, temporary config files, and listener readiness.
+- `internal/encapsulation/websocket/`: WebSocket upgrade, dial, frame, and keepalive behavior.
+- `internal/bridge/server/`: inbound WebSocket-to-TCP bridge and WebSocket reverse proxy.
+- `internal/bridge/client/`: optional legacy local TCP-to-WebSocket client.
+- `internal/bridge/connection/`: bidirectional WebSocket/TCP stream forwarding.
+- `internal/relay/`: server lifecycle and HTTP route wiring.
+- `internal/relay/session/`: shared session limits.
+
+The split retains the existing application paths, environment variables, generated profile fields, listener addresses, and protocol flow.
