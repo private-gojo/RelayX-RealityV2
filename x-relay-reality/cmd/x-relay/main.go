@@ -80,7 +80,6 @@ func runServer() error {
 		}
 	}
 
-	bridgeServer := bridge.NewServer(cfg.XrayAddr, cfg.WSPath, cfg.RelayToken, maxSessions)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/profile.json", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -98,7 +97,22 @@ func runServer() error {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(data)
 	})
-	mux.Handle("/", bridgeServer.Handler())
+
+	chainHandler := bridge.NewWSProxyHandler(cfg.XrayWSAddr, cfg.ChainPath, cfg.RelayToken)
+	legacyHandler := bridge.NewServerHandler(cfg.XrayAddr, cfg.RelayToken)
+	mux.Handle(cfg.ChainPath, limitHandler(chainHandler, maxSessions))
+	mux.Handle("/_ws", limitHandler(legacyHandler, maxSessions))
+	if cfg.WSPath != cfg.ChainPath && cfg.WSPath != "/_ws" {
+		mux.Handle(cfg.WSPath, limitHandler(legacyHandler, maxSessions))
+	}
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
 
 	httpServer := &http.Server{
 		Addr:              ":" + cfg.Port,
@@ -124,12 +138,10 @@ func runServer() error {
 			log.Printf("[SERVER] HTTP server stopped: %v", err)
 		}
 	case err := <-xrayDone:
-		bridgeServer.CloseAll()
 		_ = httpServer.Close()
 		return fmt.Errorf("Xray exited unexpectedly: %v", err)
 	}
 
-	bridgeServer.CloseAll()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	_ = httpServer.Shutdown(shutdownCtx)
@@ -155,13 +167,9 @@ func runClient() error {
 		return err
 	}
 
-	client, err := bridge.NewClient(localAddr, remoteURL, cfg.RelayToken, maxSessions)
-	if err != nil {
-		return err
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	return client.Run(ctx)
+	return bridge.RunClient(ctx, localAddr, remoteURL, "", cfg.RelayToken, maxSessions)
 }
 
 func writeClientConfig() error {
@@ -294,6 +302,19 @@ func maxSessionsFromEnv() (int, error) {
 		return 0, errors.New("MAX_SESSIONS must be an integer from 1 to 1000")
 	}
 	return maxSessions, nil
+}
+
+func limitHandler(next http.Handler, maxSessions int) http.Handler {
+	limit := make(chan struct{}, maxSessions)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case limit <- struct{}{}:
+			defer func() { <-limit }()
+			next.ServeHTTP(w, r)
+		default:
+			http.Error(w, "session capacity reached", http.StatusServiceUnavailable)
+		}
+	})
 }
 
 func valueOr(value, fallback string) string {
