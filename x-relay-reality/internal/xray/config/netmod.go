@@ -152,4 +152,3 @@ func GenerateNetModProfileJSON(c *appconfig.Config) ([]byte, error) {
 
 	return json.MarshalIndent(profile, "", "  ")
 }
-

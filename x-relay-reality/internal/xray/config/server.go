@@ -33,11 +33,10 @@ func GenerateServerJSON(c *appconfig.Config) ([]byte, error) {
 		"log": map[string]any{
 			"loglevel": "warning",
 		},
-		"inbounds": serverInbounds(c, host, portStr, wsHost, wsPort, chainPath),
+		"inbounds":  serverInbounds(c, host, portStr, wsHost, wsPort, chainPath),
 		"outbounds": serverOutbounds(host, portStr),
-		"routing": serverRouting(),
+		"routing":   serverRouting(),
 	}
 
 	return json.MarshalIndent(serverConfig, "", "  ")
 }
-

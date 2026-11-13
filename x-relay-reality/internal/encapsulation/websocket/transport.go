@@ -20,7 +20,7 @@ const (
 var upgrader = gorilla.Upgrader{
 	ReadBufferSize:  BufferSize,
 	WriteBufferSize: BufferSize,
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin:     func(r *http.Request) bool { return true },
 }
 
 func Upgrade(w http.ResponseWriter, r *http.Request) (*gorilla.Conn, error) {
@@ -30,8 +30,8 @@ func Upgrade(w http.ResponseWriter, r *http.Request) (*gorilla.Conn, error) {
 func NewDialer() *gorilla.Dialer {
 	return &gorilla.Dialer{
 		HandshakeTimeout: DialTimeout,
-		ReadBufferSize: BufferSize,
-		WriteBufferSize: BufferSize,
+		ReadBufferSize:   BufferSize,
+		WriteBufferSize:  BufferSize,
 	}
 }
 

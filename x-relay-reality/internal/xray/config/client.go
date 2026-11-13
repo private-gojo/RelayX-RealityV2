@@ -72,4 +72,3 @@ func GenerateClientJSON(c *appconfig.Config) ([]byte, error) {
 
 	return json.MarshalIndent(clientConfig, "", "  ")
 }
-

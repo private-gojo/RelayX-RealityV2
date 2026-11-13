@@ -37,7 +37,7 @@ func NewServerHandler(targetAddr, expectedToken string) http.HandlerFunc {
 }
 
 func NewWSProxyHandler(targetWSAddr, wsPath, expectedToken string) http.HandlerFunc {
-	targetURL := &url.URL{Scheme:"http", Host:targetWSAddr}
+	targetURL := &url.URL{Scheme: "http", Host: targetWSAddr}
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 	proxy.FlushInterval = -1
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -45,7 +45,9 @@ func NewWSProxyHandler(targetWSAddr, wsPath, expectedToken string) http.HandlerF
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
-		if wsPath != "" { r.URL.Path = wsPath }
+		if wsPath != "" {
+			r.URL.Path = wsPath
+		}
 		proxy.ServeHTTP(w, r)
 	}
 }

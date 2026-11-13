@@ -43,4 +43,3 @@ func TestLoadFromEnvClientRequiresHost(t *testing.T) {
 		t.Fatal("expected error when CLOUD_RUN_HOST is missing in client mode")
 	}
 }
-

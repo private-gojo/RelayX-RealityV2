@@ -31,9 +31,15 @@ func BridgeConnections(wsConn *gorilla.Conn, tcpConn net.Conn) {
 		defer closeBoth()
 		for {
 			messageType, data, err := wsConn.ReadMessage()
-			if err != nil { return }
-			if messageType != gorilla.BinaryMessage && messageType != gorilla.TextMessage { continue }
-			if _, err := tcpConn.Write(data); err != nil { return }
+			if err != nil {
+				return
+			}
+			if messageType != gorilla.BinaryMessage && messageType != gorilla.TextMessage {
+				continue
+			}
+			if _, err := tcpConn.Write(data); err != nil {
+				return
+			}
 		}
 	}()
 	go func() {
@@ -43,10 +49,14 @@ func BridgeConnections(wsConn *gorilla.Conn, tcpConn net.Conn) {
 		for {
 			n, err := tcpConn.Read(buf)
 			if n > 0 {
-				if writeErr := wsencap.WriteMessage(wsConn, &writeMu, gorilla.BinaryMessage, buf[:n]); writeErr != nil { return }
+				if writeErr := wsencap.WriteMessage(wsConn, &writeMu, gorilla.BinaryMessage, buf[:n]); writeErr != nil {
+					return
+				}
 			}
 			if err != nil {
-				if err != io.EOF { log.Printf("[bridge] tcp read error: %v", err) }
+				if err != io.EOF {
+					log.Printf("[bridge] tcp read error: %v", err)
+				}
 				return
 			}
 		}
@@ -57,7 +67,8 @@ func BridgeConnections(wsConn *gorilla.Conn, tcpConn net.Conn) {
 		defer ticker.Stop()
 		for {
 			select {
-			case <-done: return
+			case <-done:
+				return
 			case <-ticker.C:
 				if err := wsencap.WriteMessage(wsConn, &writeMu, gorilla.PingMessage, nil); err != nil {
 					closeBoth()
