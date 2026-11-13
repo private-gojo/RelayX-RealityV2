@@ -37,7 +37,7 @@ func NewServerHandler(targetAddr, expectedToken string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if expectedToken != "" {
 			token := r.Header.Get("X-Relay-Auth")
-			if token != expectedToken {
+			if token != expectedToken && r.Header.Get("Authorization") != "Bearer "+expectedToken {
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -89,7 +89,11 @@ func NewWSProxyHandler(targetWSAddr, wsPath, expectedToken string) http.HandlerF
 
 // RunClient starts a local TCP listener on listenAddr and forwards each connection
 // over WebSocket (wsURL) to the Cloud Run server.
-func RunClient(ctx context.Context, listenAddr, wsURL, hostHeader, relayToken string) error {
+func RunClient(ctx context.Context, listenAddr, wsURL, hostHeader, relayToken string, maxSessions int) error {
+	if maxSessions < 1 || maxSessions > 1000 {
+		return fmt.Errorf("maxSessions must be from 1 to 1000")
+	}
+
 	lc := net.ListenConfig{}
 	listener, err := lc.Listen(ctx, "tcp", listenAddr)
 	if err != nil {
@@ -104,6 +108,7 @@ func RunClient(ctx context.Context, listenAddr, wsURL, hostHeader, relayToken st
 		_ = listener.Close()
 	}()
 
+	limit := make(chan struct{}, maxSessions)
 	for {
 		tcpConn, err := listener.Accept()
 		if err != nil {
@@ -116,7 +121,15 @@ func RunClient(ctx context.Context, listenAddr, wsURL, hostHeader, relayToken st
 			}
 		}
 
-		go handleClientConn(ctx, tcpConn, wsURL, hostHeader, relayToken)
+		select {
+		case limit <- struct{}{}:
+			go func(conn net.Conn) {
+				defer func() { <-limit }()
+				handleClientConn(ctx, conn, wsURL, hostHeader, relayToken)
+			}(tcpConn)
+		default:
+			_ = tcpConn.Close()
+		}
 	}
 }
 
