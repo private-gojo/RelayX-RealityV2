@@ -19,7 +19,7 @@ const (
 	FixedPrivateKey  = "MD7Faoxwbj5bFx7vDdDpYaAvePia1H6CZ4CvHmrFemU"
 	FixedPublicKey   = "xaTNSdK2aQv7ND8DxZcej-dtiEldJZUIRCoQHXkPwFw"
 	FixedShortID     = "b25078a30229392b"
-	FixedBridgeToken = "d0b392d0ce0f05a82dcee11d421c9b45da9790692c095510e8f7966"
+	FixedBridgeToken = "d0b392d0ce0f05a82dcee11d421c9b45da9790692c09551032ba2e800e8f7966"
 	FixedServerName  = "firebaseremoteconfigrealtime.googleapis.com"
 	FixedTarget      = "firebaseremoteconfigrealtime.googleapis.com:443"
 	FixedCloudRunHost = "relayx-reality-v2-667648148327.asia-east1.run.app"
