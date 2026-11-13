@@ -13,14 +13,14 @@ import (
 )
 
 func TestUnauthorizedWebsocketRejected(t *testing.T) {
-	upstream, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer upstream.Close()
+	token := strings.Repeat("a", 64)
+	mux := http.NewServeMux()
+	legacyHandler := NewServerHandler("127.0.0.1:1", token)
+	mux.Handle("/reality", legacyHandler)
+	mux.Handle("/_ws", legacyHandler)
+	mux.Handle("/_chain", NewWSProxyHandler("127.0.0.1:1", "/_chain", token))
 
-	server := NewServer(upstream.Addr().String(), "/reality", strings.Repeat("a", 64), 4)
-	httpServer := httptest.NewServer(server.Handler())
+	httpServer := httptest.NewServer(mux)
 	defer httpServer.Close()
 
 	for _, path := range []string{"/reality", "/_ws", "/_chain"} {
@@ -55,13 +55,12 @@ func TestWebsocketBridgePreservesByteStream(t *testing.T) {
 	}()
 
 	token := strings.Repeat("b", 64)
-	bridgeServer := NewServer(upstream.Addr().String(), "/reality", token, 4)
-	httpServer := httptest.NewServer(bridgeServer.Handler())
+	httpServer := httptest.NewServer(NewServerHandler(upstream.Addr().String(), token))
 	defer httpServer.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/reality"
 	header := http.Header{}
-	header.Set("Authorization", "Bearer "+token)
+	header.Set("X-Relay-Auth", token)
 	ws, _, err := websocket.DefaultDialer.Dial(wsURL, header)
 	if err != nil {
 		t.Fatal(err)
@@ -93,7 +92,7 @@ func TestWebsocketBridgePreservesByteStream(t *testing.T) {
 	}
 }
 
-func TestLegacyWebsocketAliasPreservesByteStream(t *testing.T) {
+func TestLegacyBearerAuthorizationAccepted(t *testing.T) {
 	upstream, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -110,19 +109,19 @@ func TestLegacyWebsocketAliasPreservesByteStream(t *testing.T) {
 	}()
 
 	token := strings.Repeat("c", 64)
-	server := NewServer(upstream.Addr().String(), "/reality", token, 4)
-	httpServer := httptest.NewServer(server.Handler())
+	httpServer := httptest.NewServer(NewServerHandler(upstream.Addr().String(), token))
 	defer httpServer.Close()
 
-	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/_ws"
-	header := http.Header{"Authorization": []string{"Bearer " + token}}
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/reality"
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+token)
 	ws, _, err := websocket.DefaultDialer.Dial(wsURL, header)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ws.Close()
 
-	payload := []byte("legacy alias")
+	payload := []byte("legacy bearer")
 	if err := ws.WriteMessage(websocket.BinaryMessage, payload); err != nil {
 		t.Fatal(err)
 	}
@@ -136,12 +135,16 @@ func TestLegacyWebsocketAliasPreservesByteStream(t *testing.T) {
 	}
 }
 
-func TestChainWebsocketProxiesFrames(t *testing.T) {
+func TestChainReverseProxyPreservesWebsocketFrames(t *testing.T) {
 	token := strings.Repeat("d", 64)
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	chainServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/chain" {
+		if r.URL.Path != "/_chain" {
 			http.Error(w, "bad path", http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("X-Relay-Auth") != token {
+			http.Error(w, "missing auth forwarding", http.StatusUnauthorized)
 			return
 		}
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -162,9 +165,8 @@ func TestChainWebsocketProxiesFrames(t *testing.T) {
 	defer chainServer.Close()
 
 	host := strings.TrimPrefix(chainServer.URL, "http://")
-	server := NewServer("127.0.0.1:1", "/reality", token, 4)
-	server.chainUpstream = host
-	httpServer := httptest.NewServer(server.Handler())
+	handler := NewWSProxyHandler(host, "/_chain", token)
+	httpServer := httptest.NewServer(handler)
 	defer httpServer.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/_chain"
