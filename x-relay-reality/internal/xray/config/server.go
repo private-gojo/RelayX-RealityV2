@@ -3,7 +3,6 @@ package xrayconfig
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 
 	appconfig "github.com/private-gojo/relayx-reality-v2/x-relay-reality/internal/config"
 )
@@ -26,7 +25,7 @@ func GenerateServerJSON(c *appconfig.Config) ([]byte, error) {
 
 	chainPath := c.ChainPath
 	if chainPath == "" {
-		chainPath = DefaultChainPath
+		chainPath = appconfig.DefaultChainPath
 	}
 
 	serverConfig := map[string]any{
