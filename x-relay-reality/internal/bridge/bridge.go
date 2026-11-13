@@ -114,7 +114,8 @@ func (s *Server) handleChain(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !authorized(r.Header.Get("Authorization"), s.token) {
+	if !authorized(r.Header.Get("Authorization"), s.token) &&
+		!authorized("Bearer "+r.Header.Get("X-Relay-Auth"), s.token) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
