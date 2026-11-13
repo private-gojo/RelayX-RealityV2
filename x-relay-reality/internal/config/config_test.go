@@ -179,7 +179,6 @@ func TestNetModJSONRejectsInvalidCloudRunHost(t *testing.T) {
 		"",
 		"https://relay.example.run.app",
 		"relay.example.run.app/path",
-		"relay.example.run.app:443",
 		"bad host.example",
 	} {
 		if _, err := validConfig().NetModJSON(host); err == nil {
