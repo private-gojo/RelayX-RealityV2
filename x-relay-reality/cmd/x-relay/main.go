@@ -44,22 +44,26 @@ func main() {
 }
 
 func runServer() error {
-	cfg, err := config.Load()
+	cfg, err := config.LoadFromEnv()
 	if err != nil {
 		return err
 	}
+	maxSessions, err := maxSessionsFromEnv()
+	if err != nil {
+		return err
+	}
+
 	configPath, cleanup, err := writeTempConfig(cfg)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	xrayBin := valueOr(os.Getenv("XRAY_BIN"), "/usr/local/bin/xray")
-	if err := testXrayConfig(xrayBin, configPath); err != nil {
+	if err := testXrayConfig(cfg.XrayBin, configPath); err != nil {
 		return err
 	}
 
-	xrayCmd := exec.Command(xrayBin, "run", "-config", configPath)
+	xrayCmd := exec.Command(cfg.XrayBin, "run", "-config", configPath)
 	xrayCmd.Stdout = os.Stdout
 	xrayCmd.Stderr = os.Stderr
 	if err := xrayCmd.Start(); err != nil {
@@ -68,10 +72,7 @@ func runServer() error {
 	xrayDone := make(chan error, 1)
 	go func() { xrayDone <- xrayCmd.Wait() }()
 
-	for _, address := range []string{
-		fmt.Sprintf("127.0.0.1:%d", config.ChainInboundPort),
-		fmt.Sprintf("127.0.0.1:%d", config.RealityInboundPort),
-	} {
+	for _, address := range []string{cfg.XrayWSAddr, cfg.XrayAddr} {
 		if err := waitForTCP(address, 10*time.Second); err != nil {
 			_ = xrayCmd.Process.Kill()
 			<-xrayDone
@@ -79,19 +80,14 @@ func runServer() error {
 		}
 	}
 
-	bridgeServer := bridge.NewServer(
-		fmt.Sprintf("127.0.0.1:%d", config.RealityInboundPort),
-		cfg.Path,
-		cfg.BridgeToken,
-		cfg.MaxSessions,
-	)
+	bridgeServer := bridge.NewServer(cfg.XrayAddr, cfg.WSPath, cfg.RelayToken, maxSessions)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/profile.json", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		data, err := cfg.NetModJSON(r.Host)
+		data, err := cfg.WithCloudRunHost(r.Host).GenerateNetModProfileJSON()
 		if err != nil {
 			http.Error(w, "invalid service host", http.StatusBadRequest)
 			return
@@ -112,7 +108,7 @@ func runServer() error {
 	httpDone := make(chan error, 1)
 	go func() {
 		log.Printf("[SERVER] listening=:%s chain_path=%s legacy_path=%s profile_path=/profile.json max_sessions=%d",
-			cfg.Port, config.ChainPath, cfg.Path, cfg.MaxSessions)
+			cfg.Port, cfg.ChainPath, cfg.WSPath, maxSessions)
 		httpDone <- httpServer.ListenAndServe()
 	}()
 
@@ -150,20 +146,16 @@ func runServer() error {
 func runClient() error {
 	localAddr := valueOr(os.Getenv("LOCAL_ADDR"), "127.0.0.1:11000")
 	remoteURL := os.Getenv("REMOTE_WS_URL")
-	cfg, err := config.Load()
+	cfg, err := config.LoadFromEnv()
 	if err != nil {
 		return err
 	}
-	token := cfg.BridgeToken
-	maxSessions := 256
-	if value := os.Getenv("MAX_SESSIONS"); value != "" {
-		n, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid MAX_SESSIONS: %w", err)
-		}
-		maxSessions = n
+	maxSessions, err := maxSessionsFromEnv()
+	if err != nil {
+		return err
 	}
-	client, err := bridge.NewClient(localAddr, remoteURL, token, maxSessions)
+
+	client, err := bridge.NewClient(localAddr, remoteURL, cfg.RelayToken, maxSessions)
 	if err != nil {
 		return err
 	}
@@ -173,11 +165,11 @@ func runClient() error {
 }
 
 func writeClientConfig() error {
-	cfg, err := config.LoadClient()
+	cfg, err := config.LoadFromEnv()
 	if err != nil {
 		return err
 	}
-	data, err := cfg.ClientJSON()
+	data, err := cfg.GenerateClientJSON()
 	if err != nil {
 		return err
 	}
@@ -193,11 +185,11 @@ func writeClientConfig() error {
 }
 
 func validateXrayConfig() error {
-	cfg, err := config.Load()
+	cfg, err := config.LoadFromEnv()
 	if err != nil {
 		return err
 	}
-	serverConfig, err := cfg.ServerJSON()
+	serverConfig, err := cfg.GenerateServerJSON()
 	if err != nil {
 		return err
 	}
@@ -207,7 +199,7 @@ func validateXrayConfig() error {
 	}
 	defer cleanupServer()
 
-	clientConfig, err := cfg.ClientJSON()
+	clientConfig, err := cfg.GenerateClientJSON()
 	if err != nil {
 		return err
 	}
@@ -217,7 +209,7 @@ func validateXrayConfig() error {
 	}
 	defer cleanupClient()
 
-	netModConfig, err := cfg.NetModJSON(config.FixedCloudRunHost)
+	netModConfig, err := cfg.WithCloudRunHost("smoke-test.run.app").GenerateNetModProfileJSON()
 	if err != nil {
 		return err
 	}
@@ -227,22 +219,21 @@ func validateXrayConfig() error {
 	}
 	defer cleanupNetMod()
 
-	xrayBin := valueOr(os.Getenv("XRAY_BIN"), "/usr/local/bin/xray")
-	if err := testXrayConfig(xrayBin, serverPath); err != nil {
+	if err := testXrayConfig(cfg.XrayBin, serverPath); err != nil {
 		return fmt.Errorf("server config validation failed: %w", err)
 	}
-	if err := testXrayConfig(xrayBin, clientPath); err != nil {
+	if err := testXrayConfig(cfg.XrayBin, clientPath); err != nil {
 		return fmt.Errorf("legacy client config validation failed: %w", err)
 	}
-	if err := testXrayConfig(xrayBin, netModPath); err != nil {
+	if err := testXrayConfig(cfg.XrayBin, netModPath); err != nil {
 		return fmt.Errorf("NetMod chained profile validation failed: %w", err)
 	}
 	log.Printf("[CHECK] server, legacy client, and zero-Termux NetMod configurations accepted")
 	return nil
 }
 
-func writeTempConfig(cfg config.Config) (string, func(), error) {
-	data, err := cfg.ServerJSON()
+func writeTempConfig(cfg *config.Config) (string, func(), error) {
+	data, err := cfg.GenerateServerJSON()
 	if err != nil {
 		return "", nil, err
 	}
@@ -294,6 +285,15 @@ func waitForTCP(address string, timeout time.Duration) error {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return fmt.Errorf("timed out waiting for %s", address)
+}
+
+func maxSessionsFromEnv() (int, error) {
+	value := valueOr(os.Getenv("MAX_SESSIONS"), "256")
+	maxSessions, err := strconv.Atoi(value)
+	if err != nil || maxSessions < 1 || maxSessions > 1000 {
+		return 0, errors.New("MAX_SESSIONS must be an integer from 1 to 1000")
+	}
+	return maxSessions, nil
 }
 
 func valueOr(value, fallback string) string {
