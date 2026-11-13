@@ -1,33 +1,34 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-image="${1:?Usage: bash scripts/deploy.sh ghcr.io/private-gojo/relayx-reality-v2:tag}"
-command -v gcloud >/dev/null 2>&1 || { echo "[ERROR] Google Cloud CLI is required." >&2; exit 1; }
-
-SERVICE_NAME="${SERVICE_NAME:-relayx-reality-v2}"
+# Deploy x-relay-reality to Google Cloud Run
+PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project)}"
 REGION="${REGION:-asia-east1}"
-MAX_SESSIONS="${MAX_SESSIONS:-256}"
+SERVICE_NAME="${SERVICE_NAME:-relayx-reality-v2}"
 
-[[ "$MAX_SESSIONS" =~ ^[0-9]+$ ]] && (( MAX_SESSIONS >= 1 && MAX_SESSIONS <= 1000 )) || {
-  echo "[ERROR] MAX_SESSIONS must be from 1 to 1000." >&2
-  exit 1
-}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_DIR="$(dirname "${SCRIPT_DIR}")"
 
-echo "[DEPLOY] service=$SERVICE_NAME region=$REGION image=$image"
+echo "Deploying ${SERVICE_NAME} from ${APP_DIR} to Cloud Run (Project: ${PROJECT_ID}, Region: ${REGION})..."
 
-gcloud run deploy "$SERVICE_NAME" \
-  --image "$image" \
-  --region "$REGION" \
-  --platform managed \
+gcloud run deploy "${SERVICE_NAME}" \
+  --source="${APP_DIR}" \
+  --region="${REGION}" \
+  --platform=managed \
   --allow-unauthenticated \
-  --port 8080 \
-  --timeout 3600 \
-  --concurrency "$MAX_SESSIONS" \
-  --set-env-vars "MAX_SESSIONS=$MAX_SESSIONS" \
-  --cpu 2 \
-  --memory 1Gi \
+  --port=8080 \
+  --timeout=3600 \
+  --memory=512Mi \
+  --cpu=1 \
+  --set-env-vars="MODE=server,WS_PATH=/reality,CHAIN_PATH=/_chain,XHTTP_PATH=/xh,REALITY_DEST=firebaseremoteconfigrealtime.googleapis.com:443,REALITY_SERVER_NAMES=googleapis.com^:^firebaseremoteconfigrealtime.googleapis.com" \
   --quiet
 
-gcloud run services describe "$SERVICE_NAME" \
-  --region "$REGION" \
-  --format='value(status.url)'
+SERVICE_URL="$(gcloud run services describe "${SERVICE_NAME}" --region="${REGION}" --format='value(status.url)')"
+SERVICE_HOST="${SERVICE_URL#https://}"
+
+echo "=========================================="
+echo " Deployment Complete!"
+echo " Service URL : ${SERVICE_URL}"
+echo " Service Host: ${SERVICE_HOST}"
+echo " NetMod JSON : ${SERVICE_URL}/profile.json"
+echo "=========================================="

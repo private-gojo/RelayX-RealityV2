@@ -2,187 +2,128 @@ package config
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
 
-func validConfig() Config {
-	return Config{
-		UUID:        "47be59a9-103b-4065-9c3a-ebb9ecf8ffd3",
-		PrivateKey:  FixedPrivateKey,
-		ShortID:     "0123456789abcdef",
-		ServerName:  FixedServerName,
-		Target:      FixedTarget,
-		Path:        "/reality",
-		BridgeToken: strings.Repeat("a", 64),
-		Port:        "8080",
-		MaxSessions: 256,
-	}
-}
+func TestLoadFromEnvServer(t *testing.T) {
+	os.Setenv("MODE", "server")
+	os.Setenv("PORT", "9090")
+	os.Setenv("VLESS_UUID", "11111111-2222-3333-4444-555555555555")
+	defer func() {
+		os.Unsetenv("MODE")
+		os.Unsetenv("PORT")
+		os.Unsetenv("VLESS_UUID")
+	}()
 
-func decodeConfig(t *testing.T, data []byte) map[string]any {
-	t.Helper()
-	var decoded map[string]any
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		t.Fatalf("invalid JSON: %v", err)
-	}
-	return decoded
-}
-
-func TestConfigValidate(t *testing.T) {
-	if err := validConfig().Validate(); err != nil {
-		t.Fatalf("valid config rejected: %v", err)
-	}
-}
-
-func TestConfigRejectsInvalidShortID(t *testing.T) {
-	cfg := validConfig()
-	cfg.ShortID = "abc"
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected odd-length short ID to fail")
-	}
-}
-
-func TestConfigRejectsInvalidPrivateKey(t *testing.T) {
-	cfg := validConfig()
-	cfg.PrivateKey = "not-a-key"
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected invalid private key to fail")
-	}
-}
-
-func TestServerJSONDefinesChainAndREALITYInbounds(t *testing.T) {
-	data, err := validConfig().ServerJSON()
+	cfg, err := LoadFromEnv()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-	decoded := decodeConfig(t, data)
-	inbounds := decoded["inbounds"].([]any)
-	if len(inbounds) != 2 {
-		t.Fatalf("expected two inbounds, got %d", len(inbounds))
+	if cfg.Mode != "server" {
+		t.Errorf("expected mode 'server', got %q", cfg.Mode)
 	}
-
-	chain := inbounds[0].(map[string]any)
-	if chain["tag"] != "chain-ws" || chain["port"] != float64(ChainInboundPort) {
-		t.Fatalf("unexpected chain inbound: %#v", chain)
+	if cfg.Port != "9090" {
+		t.Errorf("expected port '9090', got %q", cfg.Port)
 	}
-	chainStream := chain["streamSettings"].(map[string]any)
-	if chainStream["method"] != "websocket" || chainStream["security"] != "none" {
-		t.Fatalf("unexpected chain transport: %#v", chainStream)
+	if cfg.UUID != "11111111-2222-3333-4444-555555555555" {
+		t.Errorf("unexpected UUID: %q", cfg.UUID)
 	}
-	chainWS := chainStream["wsSettings"].(map[string]any)
-	if chainWS["path"] != ChainInboundPath {
-		t.Fatalf("unexpected chain path: %#v", chainWS)
-	}
-
-	reality := inbounds[1].(map[string]any)
-	if reality["tag"] != "reality-xhttp" || reality["port"] != float64(RealityInboundPort) {
-		t.Fatalf("unexpected REALITY inbound: %#v", reality)
-	}
-	stream := reality["streamSettings"].(map[string]any)
-	if stream["method"] != "xhttp" || stream["security"] != "reality" {
-		t.Fatalf("unexpected REALITY transport settings: %#v", stream)
-	}
-	realitySettings := stream["realitySettings"].(map[string]any)
-	if realitySettings["target"] != FixedTarget {
-		t.Fatalf("unexpected REALITY target: %v", realitySettings["target"])
-	}
-	serverNames := realitySettings["serverNames"].([]any)
-	if len(serverNames) != 1 || serverNames[0] != FixedServerName {
-		t.Fatalf("unexpected REALITY serverNames: %#v", serverNames)
-	}
-
-	routing := decoded["routing"].(map[string]any)
-	rules := routing["rules"].([]any)
-	rule := rules[0].(map[string]any)
-	if rule["outboundTag"] != "chain-redirect" {
-		t.Fatalf("unexpected chain routing rule: %#v", rule)
-	}
-	outbounds := decoded["outbounds"].([]any)
-	redirect := outbounds[1].(map[string]any)
-	settings := redirect["settings"].(map[string]any)
-	if settings["redirect"] != "127.0.0.1:18443" {
-		t.Fatalf("unexpected chain redirect: %#v", settings)
+	if cfg.RealityDest != "firebaseremoteconfigrealtime.googleapis.com:443" {
+		t.Errorf("unexpected default RealityDest: %q", cfg.RealityDest)
 	}
 }
 
-func TestClientJSONPreservesLegacyAdapterProfile(t *testing.T) {
-	data, err := validConfig().ClientJSON()
+func TestLoadFromEnvClientRequiresHost(t *testing.T) {
+	os.Setenv("MODE", "client")
+	os.Unsetenv("CLOUD_RUN_HOST")
+	defer os.Unsetenv("MODE")
+
+	_, err := LoadFromEnv()
+	if err == nil {
+		t.Fatal("expected error when CLOUD_RUN_HOST is missing in client mode")
+	}
+}
+
+func TestGenerateServerJSON(t *testing.T) {
+	cfg := &Config{
+		Mode:        "server",
+		XrayAddr:    "127.0.0.1:18443",
+		XrayWSAddr:  "127.0.0.1:18080",
+		ChainPath:   "/_chain",
+		XHTTPPath:   "/xh",
+		UUID:        "1ef40695-9d5b-498e-aeaa-c44ab281ca61",
+		PrivateKey:  "eKS-gh5AXjEdJ3sGF7hDpUhFlKGJ615192I4no0yFGo",
+		ShortID:     "6ca30cd71da67803",
+		RealityDest: "firebaseremoteconfigrealtime.googleapis.com:443",
+		ServerNames: []string{"googleapis.com", "firebaseremoteconfigrealtime.googleapis.com"},
+	}
+
+	data, err := cfg.GenerateServerJSON()
 	if err != nil {
-		t.Fatal(err)
-	}
-	decoded := decodeConfig(t, data)
-	outbound := decoded["outbounds"].([]any)[0].(map[string]any)
-	settings := outbound["settings"].(map[string]any)
-	vnext := settings["vnext"].([]any)[0].(map[string]any)
-	if vnext["address"] != "127.0.0.1" || vnext["port"] != float64(11000) {
-		t.Fatalf("legacy client adapter target changed: %#v", vnext)
-	}
-	stream := outbound["streamSettings"].(map[string]any)
-	reality := stream["realitySettings"].(map[string]any)
-	if reality["password"] != FixedPublicKey || reality["serverName"] != FixedServerName {
-		t.Fatalf("unexpected REALITY client settings: %#v", reality)
-	}
-	if _, exists := reality["publicKey"]; exists {
-		t.Fatal("legacy publicKey field must not be emitted")
-	}
-}
-
-func TestNetModJSONUsesDialerProxyChain(t *testing.T) {
-	cfg := validConfig()
-	data, err := cfg.NetModJSON("relay.example.run.app")
-	if err != nil {
-		t.Fatal(err)
-	}
-	decoded := decodeConfig(t, data)
-	outbounds := decoded["outbounds"].([]any)
-	if len(outbounds) != 2 {
-		t.Fatalf("expected two client outbounds, got %d", len(outbounds))
+		t.Fatalf("GenerateServerJSON failed: %v", err)
 	}
 
-	realityOutbound := outbounds[0].(map[string]any)
-	realityStream := realityOutbound["streamSettings"].(map[string]any)
-	sockopt := realityStream["sockopt"].(map[string]any)
-	if sockopt["dialerProxy"] != "cloudrun-chain" {
-		t.Fatalf("REALITY outbound is not chained: %#v", sockopt)
-	}
-	if realityStream["method"] != "xhttp" || realityStream["security"] != "reality" {
-		t.Fatalf("unexpected primary transport: %#v", realityStream)
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("generated JSON is invalid: %v", err)
 	}
 
-	chainOutbound := outbounds[1].(map[string]any)
-	chainSettings := chainOutbound["settings"].(map[string]any)
-	chainVnext := chainSettings["vnext"].([]any)[0].(map[string]any)
-	if chainVnext["address"] != "relay.example.run.app" || chainVnext["port"] != float64(443) {
-		t.Fatalf("unexpected Cloud Run endpoint: %#v", chainVnext)
+	inbounds, ok := parsed["inbounds"].([]any)
+	if !ok || len(inbounds) != 2 {
+		t.Fatalf("expected 2 inbounds (outer-ws-in + reality-xhttp-in), got %v", parsed["inbounds"])
 	}
-	chainStream := chainOutbound["streamSettings"].(map[string]any)
-	if chainStream["method"] != "websocket" || chainStream["security"] != "tls" {
-		t.Fatalf("unexpected outer transport: %#v", chainStream)
-	}
-	ws := chainStream["wsSettings"].(map[string]any)
-	if ws["path"] != ChainPath || ws["host"] != "relay.example.run.app" {
-		t.Fatalf("unexpected Cloud Run WebSocket settings: %#v", ws)
-	}
-	headers := ws["headers"].(map[string]any)
-	if headers["Authorization"] != "Bearer "+cfg.BridgeToken {
-		t.Fatal("missing bridge authorization header")
-	}
-	tls := chainStream["tlsSettings"].(map[string]any)
-	if tls["serverName"] != "relay.example.run.app" {
-		t.Fatalf("unexpected Cloud Run TLS server name: %#v", tls)
-	}
-}
 
-func TestNetModJSONRejectsInvalidCloudRunHost(t *testing.T) {
-	for _, host := range []string{
-		"",
-		"https://relay.example.run.app",
-		"relay.example.run.app/path",
-		"bad host.example",
+	s := string(data)
+	for _, want := range []string{
+		`"outer-ws-in"`,
+		`"reality-xhttp-in"`,
+		`"loopback-to-reality"`,
+		`"redirect": "127.0.0.1:18443"`,
+		`"/_chain"`,
 	} {
-		if _, err := validConfig().NetModJSON(host); err == nil {
-			t.Errorf("expected invalid host %q to be rejected", host)
+		if !strings.Contains(s, want) {
+			t.Errorf("expected server JSON to contain %s", want)
+		}
+	}
+}
+
+func TestGenerateNetModProfileJSON(t *testing.T) {
+	cfg := &Config{
+		XrayAddr:     "127.0.0.1:18443",
+		ChainPath:    "/_chain",
+		XHTTPPath:    "/xh",
+		CloudRunHost: "relayx-reality-v2-667648148327.asia-east1.run.app",
+		RelayToken:   "relayx-secret-2026",
+		UUID:         DefaultBakedUUID,
+		PublicKey:    DefaultBakedPublicKey,
+		ShortID:      DefaultBakedShortID,
+		ServerNames:  []string{"googleapis.com", "firebaseremoteconfigrealtime.googleapis.com"},
+	}
+
+	data, err := cfg.GenerateNetModProfileJSON()
+	if err != nil {
+		t.Fatalf("GenerateNetModProfileJSON failed: %v", err)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("generated NetMod profile JSON is invalid: %v", err)
+	}
+
+	s := string(data)
+	for _, want := range []string{
+		`"dialerProxy": "outer-ws"`,
+		`"tag": "outer-ws"`,
+		`"address": "firebaseremoteconfigrealtime.googleapis.com"`,
+		`"Host": "relayx-reality-v2-667648148327.asia-east1.run.app"`,
+		`"path": "/_chain"`,
+		`"X-Relay-Auth": "relayx-secret-2026"`,
+		`"serverName": "firebaseremoteconfigrealtime.googleapis.com"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("expected NetMod profile JSON to contain %s", want)
 		}
 	}
 }
