@@ -1,5 +1,7 @@
 package xrayconfig
 
+import "fmt"
+
 func serverOutbounds(host string, portStr int) []any {
 	return []any{
 		map[string]any{
