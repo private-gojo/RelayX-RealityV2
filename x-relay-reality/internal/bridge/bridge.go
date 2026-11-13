@@ -27,15 +27,15 @@ const (
 )
 
 type Server struct {
-	upstream     string
+	upstream      string
 	chainUpstream string
-	path         string
-	token        string
-	limit        chan struct{}
-	upgrader     websocket.Upgrader
-	chainDialer  websocket.Dialer
-	mu           sync.Mutex
-	active       map[*websocket.Conn]struct{}
+	path          string
+	token         string
+	limit         chan struct{}
+	upgrader      websocket.Upgrader
+	chainDialer   websocket.Dialer
+	mu            sync.Mutex
+	active        map[*websocket.Conn]struct{}
 }
 
 func NewServer(upstream, path, token string, maxSessions int) *Server {
