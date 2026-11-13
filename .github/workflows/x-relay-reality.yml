@@ -100,8 +100,11 @@ jobs:
           test "$ready" -eq 1
 
           curl -fsS -H "Host: smoke-test.run.app" http://127.0.0.1:18080/profile.json > /tmp/netmod-profile.json
-          jq -e '.outbounds[0].streamSettings.sockopt.dialerProxy == "cloudrun-chain"' /tmp/netmod-profile.json
+          jq -e '.outbounds[0].streamSettings.sockopt.dialerProxy == "outer-ws"' /tmp/netmod-profile.json
           jq -e '.outbounds[1].streamSettings.wsSettings.path == "/_chain"' /tmp/netmod-profile.json
+          jq -e '.outbounds[1].settings.vnext[0].address == "firebaseremoteconfigrealtime.googleapis.com"' /tmp/netmod-profile.json
+          jq -e '.outbounds[1].streamSettings.tlsSettings.serverName == "firebaseremoteconfigrealtime.googleapis.com"' /tmp/netmod-profile.json
+          jq -e '.outbounds[1].streamSettings.wsSettings.headers.Host == "smoke-test.run.app"' /tmp/netmod-profile.json
           test "$(curl -sS -o /dev/null -w "%{http_code}" http://127.0.0.1:18080/_chain)" = "401"
 
       - name: Workflow syntax
